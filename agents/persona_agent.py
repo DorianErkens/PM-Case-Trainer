@@ -1,39 +1,37 @@
 """
-Persona Agent — ReAct loop with Langfuse observability.
+Persona Agent — ReAct loop with Langfuse v4 observability.
 
-Langfuse trace structure for each interview turn:
-  Trace: "interview-session"
-    └── Span: "persona-turn"
-          └── Generation: "react-iteration-N"  (each LLM call)
-                └── Event: "tool-call:{name}"  (each tool execution)
+Langfuse v4 uses OpenTelemetry under the hood.
+Pattern: @observe() auto-creates spans; get_client() lets you update the current span.
+
+Trace structure in Langfuse dashboard:
+  run_test()                  [root trace]
+    ├── generate_persona()    [span]
+    ├── generate_metrics()    [span]
+    └── run_persona_turn()    [span — one per PM question]
+          └── _react_loop()  [span — shows each iteration + tool calls]
 """
 
 import os
+import json
 import anthropic
 from dotenv import load_dotenv
-from langfuse import Langfuse
+from langfuse import observe, get_client
 
 from tools.persona_tools import PERSONA_TOOL_DEFINITIONS, execute_tool
 from prompts.persona_system import build_persona_system_prompt
 
-load_dotenv()
+load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-langfuse = Langfuse()  # reads LANGFUSE_PUBLIC_KEY, SECRET_KEY, HOST from env
 MODEL = "claude-sonnet-4-6"
 
 
-def run_persona_turn(pm_question: str, session_state: dict, trace=None) -> dict:
+@observe(name="persona-turn", as_type="agent")
+def run_persona_turn(pm_question: str, session_state: dict) -> dict:
     """
-    Main ReAct loop for one interview turn.
-
-    Args:
-        pm_question: The PM's question
-        session_state: Full mutable session (persona, history, resistance, etc.)
-        trace: Langfuse trace object (pass the session trace for continuity)
-
-    Returns:
-        {response, agent_log, session_state}
+    One interview turn. @observe() auto-captures inputs/outputs as a Langfuse span.
+    Because it's nested inside @observe()-decorated callers, it appears as a child span.
     """
     system_prompt = build_persona_system_prompt(session_state["persona"])
 
@@ -42,32 +40,32 @@ def run_persona_turn(pm_question: str, session_state: dict, trace=None) -> dict:
         "content": pm_question
     })
 
+    result = _react_loop(system_prompt, session_state)
+
+    # Update the current span with extra context visible in Langfuse
+    get_client().update_current_span(metadata={
+        "resistance_level": session_state.get("resistance_level"),
+        "revealed_pains": str(list(session_state.get("revealed_pains", {}).keys())),
+        "flagged_questions": len(session_state.get("flagged_questions", []))
+    })
+
+    return result
+
+
+@observe(name="react-loop", as_type="chain")
+def _react_loop(system_prompt: str, session_state: dict) -> dict:
+    """
+    The ReAct loop: Claude reasons → calls tools → observes → repeats until end_turn.
+    Each iteration is logged with token counts and tool calls.
+    """
     messages = list(session_state["conversation_history"])
     agent_log = []
-
-    # Langfuse: one span per PM turn
-    span = trace.span(
-        name="persona-turn",
-        input={"pm_question": pm_question},
-        metadata={"resistance_level": session_state.get("resistance_level")}
-    ) if trace else None
-
     final_response = ""
     iteration = 0
-    max_iterations = 10
 
-    # ── ReAct loop ───────────────────────────────────────────────────────────
-    while iteration < max_iterations:
+    while iteration < 10:
         iteration += 1
         agent_log.append({"type": "llm_call", "iteration": iteration})
-
-        # Langfuse: track each LLM call as a Generation (captures tokens + latency)
-        generation = span.generation(
-            name=f"react-iteration-{iteration}",
-            model=MODEL,
-            input=messages,
-            metadata={"system_prompt_length": len(system_prompt)}
-        ) if span else None
 
         response = client.messages.create(
             model=MODEL,
@@ -77,16 +75,6 @@ def run_persona_turn(pm_question: str, session_state: dict, trace=None) -> dict:
             messages=messages
         )
 
-        # Log token usage to Langfuse
-        if generation:
-            generation.end(
-                output=_extract_text_blocks(response.content),
-                usage={
-                    "input": response.usage.input_tokens,
-                    "output": response.usage.output_tokens
-                }
-            )
-
         agent_log.append({
             "type": "llm_response",
             "stop_reason": response.stop_reason,
@@ -94,14 +82,21 @@ def run_persona_turn(pm_question: str, session_state: dict, trace=None) -> dict:
             "output_tokens": response.usage.output_tokens
         })
 
-        # ── Claude is done → extract response and exit
+        # Log token usage per iteration on the current span
+        get_client().update_current_span(metadata={
+            f"iter_{iteration}_in_tokens": response.usage.input_tokens,
+            f"iter_{iteration}_out_tokens": response.usage.output_tokens,
+            f"iter_{iteration}_stop": response.stop_reason,
+        })
+
+        # ── Claude is done
         if response.stop_reason == "end_turn":
             for block in response.content:
                 if hasattr(block, "text"):
                     final_response = block.text
             break
 
-        # ── Claude wants tools → execute each one and feed observations back
+        # ── Claude wants to call tools
         if response.stop_reason == "tool_use":
             messages.append({"role": "assistant", "content": response.content})
 
@@ -114,30 +109,20 @@ def run_persona_turn(pm_question: str, session_state: dict, trace=None) -> dict:
                         "input": block.input
                     })
 
-                    # Langfuse: log each tool call as an Event inside the span
-                    if span:
-                        span.event(
-                            name=f"tool-call:{block.name}",
-                            input=block.input,
-                            metadata={"iteration": iteration}
-                        )
-
-                    # Execute — mutates session_state
-                    observation = execute_tool(block.name, block.input, session_state)
+                    # Each tool call is a child span in Langfuse
+                    with get_client().start_as_current_observation(
+                        name=f"tool:{block.name}",
+                        as_type="tool",
+                        input=block.input
+                    ) as tool_span:
+                        observation = execute_tool(block.name, block.input, session_state)
+                        tool_span.update(output=observation)
 
                     agent_log.append({
                         "type": "observation",
                         "tool": block.name,
                         "result": observation
                     })
-
-                    # Log the observation back on the same event
-                    if span:
-                        span.event(
-                            name=f"observation:{block.name}",
-                            output=observation,
-                            metadata={"resistance_after": session_state.get("resistance_level")}
-                        )
 
                     tool_results.append({
                         "type": "tool_result",
@@ -151,63 +136,39 @@ def run_persona_turn(pm_question: str, session_state: dict, trace=None) -> dict:
             agent_log.append({"type": "error", "stop_reason": response.stop_reason})
             break
 
-    # ── Close span with final output
-    if span:
-        span.end(
-            output={"response": final_response},
-            metadata={
-                "total_iterations": iteration,
-                "revealed_pains": list(session_state.get("revealed_pains", {}).keys()),
-                "final_resistance": session_state.get("resistance_level")
-            }
-        )
-
     if final_response:
         session_state["conversation_history"].append({
             "role": "assistant",
             "content": final_response
         })
 
-    return {
-        "response": final_response,
-        "agent_log": agent_log,
-        "session_state": session_state
-    }
+    return {"response": final_response, "agent_log": agent_log}
 
 
-def generate_persona(pm_context: str, trace=None) -> dict:
+@observe(name="generate-persona", as_type="chain")
+def generate_persona(pm_context: str) -> dict:
     """Step 1 — Generates a synthetic persona. Never shown to the PM."""
-    span = trace.span(name="generate-persona", input={"pm_context": pm_context}) if trace else None
-
-    generation = span.generation(name="persona-llm-call", model=MODEL) if span else None
-
     response = client.messages.create(
         model=MODEL,
         max_tokens=512,
         messages=[{"role": "user", "content": _persona_prompt(pm_context)}]
     )
 
-    if generation:
-        generation.end(
-            output=response.content[0].text,
-            usage={"input": response.usage.input_tokens, "output": response.usage.output_tokens}
-        )
-
-    import json
     persona = _parse_json(response.content[0].text)
 
-    if span:
-        span.end(output=persona)
+    get_client().update_current_span(metadata={
+        "in_tokens": response.usage.input_tokens,
+        "out_tokens": response.usage.output_tokens,
+        "persona_role": persona.get("role", ""),
+        "initial_resistance": persona.get("initial_resistance", 7)
+    })
 
     return persona
 
 
-def generate_metrics(persona: dict, pm_context: str, trace=None) -> list:
-    """Step 2 — Proposes 3-5 relevant metrics for this persona."""
-    span = trace.span(name="generate-metrics", input={"persona_role": persona["role"]}) if trace else None
-
-    generation = span.generation(name="metrics-llm-call", model=MODEL) if span else None
-
+@observe(name="generate-metrics", as_type="chain")
+def generate_metrics(persona: dict, pm_context: str) -> list:
+    """Step 2 — Proposes 4 relevant metrics for this persona and PM context."""
     prompt = f"""Given this persona and PM context, propose 4 metrics relevant for a discovery interview.
 
 Persona: {persona['role']} at {persona['company_type']}
@@ -220,45 +181,24 @@ Return only the JSON."""
 
     response = client.messages.create(
         model=MODEL,
-        max_tokens=512,
+        max_tokens=1024,
         messages=[{"role": "user", "content": prompt}]
     )
 
-    if generation:
-        generation.end(
-            output=response.content[0].text,
-            usage={"input": response.usage.input_tokens, "output": response.usage.output_tokens}
-        )
-
     metrics = _parse_json(response.content[0].text)
 
-    if span:
-        span.end(output=metrics)
+    get_client().update_current_span(metadata={
+        "in_tokens": response.usage.input_tokens,
+        "out_tokens": response.usage.output_tokens,
+        "metrics_count": len(metrics)
+    })
 
     return metrics
 
 
-def create_session_trace(pm_context: str) -> object:
-    """
-    Creates a Langfuse trace for the full interview session.
-    Call this once at the start, pass the trace to all subsequent functions.
-    This links all spans (persona generation, metrics, each turn) under one session.
-    """
-    return langfuse.trace(
-        name="interview-session",
-        input={"pm_context": pm_context},
-        tags=["pm-case-trainer"]
-    )
-
-
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-def _extract_text_blocks(content: list) -> str:
-    return " ".join(b.text for b in content if hasattr(b, "text"))
-
-
 def _parse_json(text: str) -> dict | list:
-    import json
     text = text.strip()
     if text.startswith("```"):
         text = text.split("```")[1]
