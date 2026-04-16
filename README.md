@@ -2,7 +2,13 @@
 
 Un agent IA qui simule un utilisateur synthétique réaliste pour entraîner les PMs à mener des entretiens percutants et identifier les vrais pains.
 
-> Projet construit de zéro en session de pair-programming avec Claude Code. Chaque décision technique a été discutée et expliquée avant d'être codée.
+> Projet construit de zéro en session de pair-programming avec Claude Code. Chaque décision technique a été discutée et expliquée avant d'être codée — l'objectif est autant de comprendre les agents IA que de construire le produit.
+
+---
+
+## Demo
+
+**[→ Lancer l'app sur Streamlit Cloud](https://pm-case-trainer.streamlit.app)** *(à venir)*
 
 ---
 
@@ -24,9 +30,30 @@ Les PMs manquent de pratique sur les entretiens utilisateurs. Les entretiens ré
 
 ---
 
-## Ce que ce projet démontre techniquement
+## Interface
 
-Ce projet est avant tout un **outil pédagogique sur les agents IA**. Il implémente le pattern **ReAct (Reason + Act)** de bout en bout, sur deux agents distincts.
+Layout deux colonnes — à gauche le flow principal, à droite le panneau **Agent Brain** qui montre en temps réel ce que l'agent décide à chaque question :
+
+```
+┌──────────────────────────┬─────────────────────────┐
+│  ENTRETIEN               │  🧠 AGENT BRAIN          │
+│                          │                          │
+│  PM: "Vous pouvez me     │  → LLM call #1           │
+│  donner un exemple       │  ← tool_use              │
+│  concret ?"              │  🔧 flag_question         │
+│                          │     {"quality":"excel..} │
+│  Sophie: *pause*         │  🔧 update_resistance    │
+│  "Oui, la semaine        │     7 → 5                │
+│  dernière..."            │  🔧 reveal_pain(1,partial│
+│                          │  👁 Pain revealed ✓      │
+│                          │  → LLM call #2           │
+│                          │  ← end_turn              │
+└──────────────────────────┴─────────────────────────┘
+```
+
+---
+
+## Ce que ce projet démontre techniquement
 
 ### La différence fondamentale : LLM call vs Agent
 
@@ -37,22 +64,20 @@ Agent ReAct :     Question → Claude raisonne
                            → appelle un tool
                            → observe le résultat
                            → raisonne à nouveau
-                           → appelle un autre tool
-                           → ...
+                           → appelle un autre tool si nécessaire
                            → répond quand il a assez d'infos
 ```
 
-Sans ce pattern, Claude répondrait en une shot sans "agir" ni "observer". Avec la boucle ReAct, l'agent **construit** sa réponse étape par étape, comme un humain qui vérifie ses notes avant de parler.
+Sans ce pattern, Claude répondrait en une shot sans cohérence entre les tours. Avec la boucle ReAct, l'agent **construit** sa réponse étape par étape — il vérifie ce qu'il a déjà dit, ajuste sa résistance, décide ce qu'il peut révéler.
 
-### Ce que ça change concrètement dans ce produit
+### Pourquoi deux agents séparés
 
-Le Persona Agent, avant chaque réponse, peut :
-1. Vérifier si ce pain a déjà été révélé → cohérence sur toute la session
-2. Évaluer si la question mérite qu'il s'ouvre → résistance dynamique
-3. Révéler une info au bon niveau de détail → réalisme de l'entretien
-4. Logger la qualité de la question → données pour le feedback
-
-Sans la boucle, il devine. Avec la boucle, il agit et observe.
+| | Persona Agent | Feedback Agent |
+|---|---|---|
+| **Quand** | Pendant l'entretien, en temps réel | Une fois, à la fin |
+| **Rôle** | Joue un personnage, résiste, révèle progressivement | Réfléchit sur la session complète |
+| **Contrainte principale** | Cohérence et réalisme | Analyse objective |
+| **Tools** | Actions sur l'état du persona | Calculs et agrégations |
 
 ---
 
@@ -60,48 +85,42 @@ Sans la boucle, il devine. Avec la boucle, il agit et observe.
 
 ```
 PM Case Trainer/
-├── test_agent.py             # Pipeline complet en terminal (persona → métriques → entretien → feedback)
+├── app.py                    # Interface Streamlit — 4 étapes + panneau Agent Brain
+├── test_agent.py             # Pipeline complet en terminal (sans UI)
 ├── agents/
-│   ├── persona_agent.py      # Agent 1 : joue le user synthétique avec boucle ReAct
-│   └── feedback_agent.py     # Agent 2 : analyse la session et génère le rapport
+│   ├── persona_agent.py      # Agent 1 : boucle ReAct + 4 tools + Langfuse
+│   └── feedback_agent.py     # Agent 2 : boucle ReAct + 4 tools + Langfuse
 ├── tools/
-│   ├── persona_tools.py      # 4 tools du Persona Agent (définitions JSON + exécuteurs Python)
-│   └── feedback_tools.py     # 4 tools du Feedback Agent
+│   ├── persona_tools.py      # Définitions JSON (ce que Claude voit) + exécuteurs Python
+│   └── feedback_tools.py     # Idem pour le Feedback Agent
 └── prompts/
     ├── persona_system.py     # System prompt dynamique — généré à partir du persona
-    └── feedback_system.py    # System prompt du Feedback Agent
+    └── feedback_system.py    # System prompt avec séquence de tools explicite
 ```
-
-### Deux agents, deux rôles
-
-| Agent | Rôle | Quand |
-|-------|------|-------|
-| **Persona Agent** | Joue le user synthétique en temps réel, résiste, révèle progressivement | Pendant l'entretien |
-| **Feedback Agent** | Analyse toute la session, score les questions, génère le rapport | Une fois l'entretien terminé |
 
 ---
 
 ## Les tools en détail
 
-Un "tool" = une action que Claude peut **décider de prendre**. Il voit la description en JSON, décide si c'est pertinent, et le code Python s'exécute côté client.
+Un "tool" = une action que Claude peut **décider de prendre**. Il voit la description JSON, décide si c'est pertinent, et le code Python s'exécute côté client.
 
-### Persona Agent tools
+### Persona Agent — 4 tools
 
 | Tool | Quand Claude l'appelle |
 |------|----------------------|
-| `reveal_pain(pain_id, level)` | La question du PM mérite qu'on lâche une info (`hint` / `partial` / `full`) |
+| `reveal_pain(pain_id, level)` | La question mérite de lâcher une info (`hint` / `partial` / `full`) |
 | `update_resistance(level, reason)` | Le style de question change l'ouverture du persona (1-10) |
 | `check_already_revealed(pain_id)` | Avant de mentionner un pain — vérification de cohérence |
 | `flag_question(quality, question, reason)` | La question est notable (`excellent` / `good` / `weak` / `closed` / `leading`) |
 
-### Feedback Agent tools
+### Feedback Agent — 4 tools
 
 | Tool | Ce qu'il calcule |
 |------|-----------------|
 | `analyze_question_patterns(focus)` | Ratio ouvertes/fermées, score de profondeur, progression |
 | `identify_missed_pains()` | Pains du persona jamais surfacés par le PM |
 | `match_pains_to_metrics()` | Couverture des métriques pré-définies |
-| `compute_score(weights)` | Score final 0-100 pondéré (pains / qualité / métriques) |
+| `compute_score(weights)` | Score final 0-100 pondéré (pains 40% / qualité 35% / métriques 25%) |
 
 ---
 
@@ -110,31 +129,29 @@ Un "tool" = une action que Claude peut **décider de prendre**. Il voit la descr
 Chaque session est tracée dans [Langfuse](https://cloud.langfuse.com) avec une hiérarchie complète :
 
 ```
-interview-session  [trace racine]
-  ├── generate-persona      → 1 LLM call, tokens, persona généré
-  ├── generate-metrics      → 1 LLM call, 4 métriques
-  ├── persona-turn (Q1)     → span par question
-  │     └── react-loop      → iterations, tool calls, observations
-  │           ├── tool:flag_question
+interview-session             [trace racine — toute la session]
+  ├── generate-persona        → 1 LLM call · persona JSON
+  ├── generate-metrics        → 1 LLM call · 4 métriques
+  ├── persona-turn (Q1)       → span par question PM
+  │     └── react-loop        → N itérations
+  │           ├── tool:flag_question       → input + observation
   │           ├── tool:check_already_revealed
   │           └── tool:reveal_pain
   ├── persona-turn (Q2) ...
-  └── feedback-agent        → span final
-        └── react-loop      → 4 tools d'analyse + score
+  └── feedback-agent          → span final
+        └── react-loop        → 4 tools d'analyse + score
 ```
 
-Le panneau debug visible dans l'UI (à venir) reprend cette même structure en temps réel.
-
-**Pattern utilisé :** `@observe()` de Langfuse v4 — chaque fonction décorée devient automatiquement un span enfant du span parent.
+Pattern utilisé : `@observe()` de Langfuse v4 — chaque fonction décorée devient automatiquement un child span du contexte parent.
 
 ```python
-@observe(name="interview-session")   # → trace racine
+@observe(name="interview-session")      # → trace racine
 def run_test():
-    generate_persona(...)            # → child span automatique
+    generate_persona(...)               # → child span automatique
 
 @observe(name="persona-turn", as_type="agent")
 def run_persona_turn(...):
-    _react_loop(...)                 # → child span de persona-turn
+    get_client().update_current_span(metadata={...})
 ```
 
 ---
@@ -143,10 +160,10 @@ def run_persona_turn(...):
 
 | Composant | Choix | Pourquoi |
 |-----------|-------|----------|
-| LLM | Claude Sonnet 4.6 | Meilleur équilibre nuance / coût pour simulation de persona |
-| SDK | Anthropic Python SDK | Accès direct au function calling et au stop_reason |
+| LLM | Claude Sonnet 4.6 | Meilleur équilibre nuance / coût pour simulation de persona réaliste |
+| SDK | Anthropic Python SDK | Accès direct au function calling et au `stop_reason` |
 | Observabilité | Langfuse 4.3+ | Open source, decorator pattern propre, dashboard complet |
-| UI | Streamlit *(à venir)* | Zéro boilerplate pour prototyper vite |
+| UI | Streamlit | Zéro boilerplate pour prototyper vite |
 | State | Session state in-memory | Pas besoin de BDD pour le MVP |
 
 ---
@@ -154,25 +171,28 @@ def run_persona_turn(...):
 ## Décisions d'architecture discutées
 
 **LangGraph vs boucle ReAct maison ?**
-LangGraph aurait géré la boucle automatiquement mais l'aurait rendue invisible. On a choisi de l'écrire à la main pour comprendre exactement ce qui se passe à chaque itération.
+LangGraph aurait géré la boucle automatiquement mais l'aurait rendue invisible. On a choisi de l'écrire à la main pour comprendre exactement ce qui se passe à chaque itération — l'objectif pédagogique prime.
 
 **Un seul agent vs deux agents ?**
-Deux agents séparés — le Persona Agent joue un rôle en temps réel, le Feedback Agent réfléchit a posteriori sur la session complète. Les system prompts, les tools et les contraintes sont trop différents pour les mélanger.
+Deux agents séparés — le Persona Agent joue un rôle en temps réel, le Feedback Agent réfléchit a posteriori. Les system prompts, les tools et les contraintes sont trop différents pour les mélanger.
 
 **Langfuse vs LangSmith ?**
-Langfuse est open source et s'intègre en un décorateur sur le code existant. LangSmith est natif à LangGraph mais introduit une dépendance forte à l'écosystème LangChain.
+Langfuse est open source et s'intègre en un décorateur sur le code existant. LangSmith est natif à l'écosystème LangChain — introduit une dépendance inutile ici.
 
 ---
 
-## Installation
+## Installation locale
 
 ```bash
 git clone https://github.com/DorianErkens/PM-Case-Trainer.git
 cd PM-Case-Trainer
 pip install -r requirements.txt
+cp .env.example .env   # puis remplis tes clés
+streamlit run app.py
 ```
 
-Crée un fichier `.env` :
+### Variables d'environnement
+
 ```
 ANTHROPIC_API_KEY=sk-ant-...
 LANGFUSE_PUBLIC_KEY=pk-lf-...
@@ -180,45 +200,36 @@ LANGFUSE_SECRET_KEY=sk-lf-...
 LANGFUSE_HOST=https://cloud.langfuse.com
 ```
 
-## Lancer le pipeline complet en terminal
+### Tester les agents en terminal (sans UI)
 
 ```bash
 python test_agent.py
 ```
 
-Output terminal :
-```
-STEP 1 — Persona Generation       → persona JSON (caché du PM)
-STEP 2 — Metrics                  → 4 métriques proposées
-STEP 3 — Interview (ReAct loop)   → chaque question avec AGENT BRAIN visible
-  [PM - Q3] Quand vous dites...
-  [AGENT BRAIN]
-    → LLM call #1
-    ← tool_use  (2196in / 177out tokens)
-    🔧 flag_question  {"quality": "excellent", ...}
-    🔧 update_resistance  {"new_level": 5, ...}
-    🔧 reveal_pain  {"pain_id": 1, "reveal_level": "partial"}
-    → LLM call #2
-    ← end_turn
-  [PERSONA] *réfléchit* Ouais, y'en a une...
-STEP 4 — Feedback Report          → rapport + score /100
-```
+---
+
+## Déploiement Streamlit Cloud
+
+1. Fork ce repo
+2. Va sur [share.streamlit.io](https://share.streamlit.io) → New app
+3. Sélectionne le repo · branch `main` · file `app.py`
+4. **Settings → Secrets** → colle les 4 variables d'env ci-dessus
 
 ---
 
 ## Ce qu'on apprend en construisant ça
 
-1. **Function calling** — comment Claude décide quel tool appeler et pourquoi (la description compte plus que le code)
-2. **La boucle ReAct** — `stop_reason == "tool_use"` vs `"end_turn"` — c'est le coeur du pattern
-3. **State management** — l'état mutable partagé entre tools, agent et UI
-4. **System prompts dynamiques** — le prompt du persona est généré à partir du persona lui-même
-5. **Multi-agent** — deux agents avec des rôles, des tools et des system prompts totalement différents
-6. **Observabilité** — tracer chaque décision de l'agent pour comprendre et débugger
+1. **Function calling** — Claude voit la description JSON, décide quand appeler le tool. C'est la description qui compte, pas le code.
+2. **La boucle ReAct** — `stop_reason == "tool_use"` vs `"end_turn"` — c'est le cœur du pattern agentic.
+3. **State management** — un objet mutable partagé entre tous les tools, les agents et l'UI.
+4. **System prompts dynamiques** — le prompt du persona est généré à partir du persona lui-même.
+5. **Multi-agent** — deux agents avec des rôles, des tools et des system prompts totalement différents.
+6. **Observabilité** — tracer chaque décision de l'agent pour comprendre, débugger, et améliorer.
 
 ---
 
 ## Prochaines étapes
 
-- [ ] Interface Streamlit avec panneau "Agent Brain" en temps réel
-- [ ] Feedback Agent — rapport interactif avec drill-down par pain
-- [ ] Mode libre (le PM pose ses propres questions) vs mode guidé
+- [ ] Calibration du scoring selon la longueur de session
+- [ ] Mode guidé vs mode libre
+- [ ] Export du rapport feedback en PDF
