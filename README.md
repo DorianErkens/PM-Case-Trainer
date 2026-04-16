@@ -1,14 +1,18 @@
 # PM Case Trainer — Synthetic User Interview Trainer
 
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://pm-case-trainer.streamlit.app)
+
 Un agent IA qui simule un utilisateur synthétique réaliste pour entraîner les PMs à mener des entretiens percutants et identifier les vrais pains.
 
-> Projet construit de zéro en session de pair-programming avec Claude Code. Chaque décision technique a été discutée et expliquée avant d'être codée — l'objectif est autant de comprendre les agents IA que de construire le produit.
+> Construit de zéro en session de pair-programming avec Claude Code. Chaque décision technique a été discutée et expliquée avant d'être codée — l'objectif est autant de comprendre les agents IA que de construire le produit.
 
 ---
 
 ## Demo
 
-**[→ Lancer l'app sur Streamlit Cloud](https://pm-case-trainer.streamlit.app)** *(à venir)*
+![PM Case Trainer — écran de feedback avec panneau Agent Brain](docs/screenshot_app.png)
+
+*Score final + rapport détaillé à gauche · Panneau Agent Brain (trace des décisions de l'agent en temps réel) à droite*
 
 ---
 
@@ -32,24 +36,7 @@ Les PMs manquent de pratique sur les entretiens utilisateurs. Les entretiens ré
 
 ## Interface
 
-Layout deux colonnes — à gauche le flow principal, à droite le panneau **Agent Brain** qui montre en temps réel ce que l'agent décide à chaque question :
-
-```
-┌──────────────────────────┬─────────────────────────┐
-│  ENTRETIEN               │  🧠 AGENT BRAIN          │
-│                          │                          │
-│  PM: "Vous pouvez me     │  → LLM call #1           │
-│  donner un exemple       │  ← tool_use              │
-│  concret ?"              │  🔧 flag_question         │
-│                          │     {"quality":"excel..} │
-│  Sophie: *pause*         │  🔧 update_resistance    │
-│  "Oui, la semaine        │     7 → 5                │
-│  dernière..."            │  🔧 reveal_pain(1,partial│
-│                          │  👁 Pain revealed ✓      │
-│                          │  → LLM call #2           │
-│                          │  ← end_turn              │
-└──────────────────────────┴─────────────────────────┘
-```
+Layout deux colonnes : à gauche le flow principal (contexte → métriques → entretien → feedback), à droite le panneau **Agent Brain** qui expose chaque décision de l'agent en temps réel — appels LLM, tools déclenchés, observations retournées.
 
 ---
 
@@ -164,6 +151,7 @@ def run_persona_turn(...):
 | SDK | Anthropic Python SDK | Accès direct au function calling et au `stop_reason` |
 | Observabilité | Langfuse 4.3+ | Open source, decorator pattern propre, dashboard complet |
 | UI | Streamlit | Zéro boilerplate pour prototyper vite |
+| Mémoire cross-sessions | Supabase | Stockage des sessions passées pour détecter les patterns récurrents |
 | State | Session state in-memory | Pas besoin de BDD pour le MVP |
 
 ---
@@ -198,7 +186,13 @@ ANTHROPIC_API_KEY=sk-ant-...
 LANGFUSE_PUBLIC_KEY=pk-lf-...
 LANGFUSE_SECRET_KEY=sk-lf-...
 LANGFUSE_HOST=https://cloud.langfuse.com
+
+# Optionnel — active la mémoire cross-sessions
+SUPABASE_URL=https://xxxx.supabase.co
+SUPABASE_KEY=your-anon-key
 ```
+
+> Sans Supabase, l'app fonctionne normalement — la mémoire cross-sessions et le dashboard de progression sont simplement désactivés.
 
 ### Tester les agents en terminal (sans UI)
 
@@ -213,7 +207,7 @@ python test_agent.py
 1. Fork ce repo
 2. Va sur [share.streamlit.io](https://share.streamlit.io) → New app
 3. Sélectionne le repo · branch `main` · file `app.py`
-4. **Settings → Secrets** → colle les 4 variables d'env ci-dessus
+4. **Settings → Secrets** → colle les variables d'env ci-dessus
 
 ---
 
@@ -226,10 +220,3 @@ python test_agent.py
 5. **Multi-agent** — deux agents avec des rôles, des tools et des system prompts totalement différents.
 6. **Observabilité** — tracer chaque décision de l'agent pour comprendre, débugger, et améliorer.
 
----
-
-## Prochaines étapes
-
-- [ ] Calibration du scoring selon la longueur de session
-- [ ] Mode guidé vs mode libre
-- [ ] Export du rapport feedback en PDF
