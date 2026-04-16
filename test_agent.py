@@ -16,6 +16,7 @@ load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 from langfuse import observe
 from agents.persona_agent import generate_persona, generate_metrics, run_persona_turn
+from agents.feedback_agent import run_feedback
 
 
 def print_sep(title: str):
@@ -80,6 +81,16 @@ def run_test():
         print(f"  [STATE] resistance={session_state['resistance_level']} | "
               f"pains={list(session_state['revealed_pains'].keys())} | "
               f"flagged={len(session_state.get('flagged_questions', []))}")
+
+    # ── Step 4: Feedback Agent ────────────────────────────────────────────────
+    print_sep("STEP 4 — Feedback Report (Feedback Agent)")
+    feedback = run_feedback(session_state)
+
+    print_agent_log(feedback["agent_log"])
+    print(f"\n{'─' * 60}")
+    print(feedback["report"])
+    print(f"{'─' * 60}")
+    print(f"\n  SCORE FINAL: {feedback['score']}/100")
 
     print_sep("DONE — check cloud.langfuse.com for the full trace")
 
