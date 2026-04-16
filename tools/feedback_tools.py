@@ -5,6 +5,26 @@ Same pattern as persona_tools: DEFINITIONS (what Claude sees) + EXECUTORS (Pytho
 
 FEEDBACK_TOOL_DEFINITIONS = [
     {
+        "name": "load_pm_history",
+        "description": (
+            "Load the PM's past sessions from the database to identify recurring patterns. "
+            "Call this FIRST, before any analysis. If history exists, reference specific past "
+            "sessions in your feedback (e.g. 'for the 3rd time, you missed the pain about X'). "
+            "If no history, proceed normally."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "last_n_sessions": {
+                    "type": "integer",
+                    "description": "Number of past sessions to load (default 5)",
+                    "default": 5
+                }
+            },
+            "required": []
+        }
+    },
+    {
         "name": "analyze_question_patterns",
         "description": (
             "Analyze the quality distribution of the PM's questions. "
@@ -80,7 +100,9 @@ FEEDBACK_TOOL_DEFINITIONS = [
 
 
 def execute_feedback_tool(tool_name: str, tool_input: dict, session_state: dict) -> str:
-    if tool_name == "analyze_question_patterns":
+    if tool_name == "load_pm_history":
+        return _load_pm_history(tool_input, session_state)
+    elif tool_name == "analyze_question_patterns":
         return _analyze_question_patterns(tool_input, session_state)
     elif tool_name == "identify_missed_pains":
         return _identify_missed_pains(session_state)
@@ -89,6 +111,47 @@ def execute_feedback_tool(tool_name: str, tool_input: dict, session_state: dict)
     elif tool_name == "compute_score":
         return _compute_score(tool_input, session_state)
     return f"Unknown tool: {tool_name}"
+
+
+def _load_pm_history(tool_input: dict, state: dict) -> str:
+    from storage.session_store import load_recent_sessions
+    n = tool_input.get("last_n_sessions", 5)
+    sessions = load_recent_sessions(n)
+
+    if not sessions:
+        state["_pm_history"] = []
+        return "No past sessions found. This is the PM's first session — proceed without historical context."
+
+    state["_pm_history"] = sessions
+
+    lines = [f"Found {len(sessions)} past session(s):\n"]
+    for i, s in enumerate(sessions, 1):
+        score = s.get("score", "?")
+        total_q = s.get("total_questions", "?")
+        missed = [p.get("content", "")[:50] for p in (s.get("missed_pains") or [])]
+        breakdown = s.get("score_breakdown") or {}
+        lines.append(
+            f"Session {i} ({s.get('created_at', '')[:10]}) — "
+            f"Score: {score}/100 | Questions: {total_q} | "
+            f"Pain discovery: {breakdown.get('pain_discovery', '?')}% | "
+            f"Missed pains: {missed}"
+        )
+
+    # Detect recurring missed pains across sessions
+    miss_counts = {}
+    for s in sessions:
+        for p in (s.get("missed_pains") or []):
+            key = p.get("content", "")[:60]
+            miss_counts[key] = miss_counts.get(key, 0) + 1
+
+    recurring = [(k, v) for k, v in miss_counts.items() if v >= 2]
+    if recurring:
+        lines.append("\nRECURRING PATTERNS (missed in 2+ sessions):")
+        for pain_hint, count in sorted(recurring, key=lambda x: -x[1]):
+            lines.append(f"  × {count}x — {pain_hint}")
+        lines.append("\n→ Reference these patterns explicitly in your feedback report.")
+
+    return "\n".join(lines)
 
 
 def _analyze_question_patterns(tool_input: dict, state: dict) -> str:

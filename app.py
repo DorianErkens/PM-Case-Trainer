@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 # Streamlit Cloud: inject st.secrets into env vars so all downstream code works unchanged
-for key in ["ANTHROPIC_API_KEY", "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_HOST"]:
+for key in ["ANTHROPIC_API_KEY", "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_HOST", "SUPABASE_URL", "SUPABASE_KEY"]:
     if key in st.secrets and not os.getenv(key):
         os.environ[key] = st.secrets[key]
 
@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from agents.persona_agent import generate_persona, generate_metrics, run_persona_turn
 from agents.feedback_agent import run_feedback
+from storage.session_store import save_session, get_dashboard_stats
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -221,12 +222,20 @@ def render_step_interview(col_main):
         if questions_asked >= 3:
             if st.button("Terminer l'entretien et obtenir le feedback →", type="primary"):
                 with st.spinner("Analyse de la session en cours..."):
+                    # Pass pm_context into session for storage
+                    st.session_state.agent_session["pm_context"] = st.session_state.pm_context
                     push_brain({"type": "section", "label": "Feedback Agent"})
                     result = run_feedback(st.session_state.agent_session)
                     agent_log_to_brain(result["agent_log"], "Analyse feedback")
                     push_brain({"type": "state_update",
                                 "message": f"Score final : {result.get('score')}/100"})
                     st.session_state.feedback_result = result
+
+                with st.spinner("Sauvegarde de la session..."):
+                    saved = save_session(st.session_state.agent_session, result)
+                    if saved:
+                        push_brain({"type": "state_update", "message": "Session sauvegardée dans Supabase ✓"})
+
                 st.session_state.step = "feedback"
                 st.rerun()
         else:
@@ -245,6 +254,25 @@ def render_step_feedback(col_main):
         color = "green" if score >= 70 else "orange" if score >= 40 else "red"
         st.markdown(f"## Score final : :{color}[{score}/100]")
         st.progress(score / 100)
+
+        # Progress dashboard — only shown if past sessions exist
+        stats = get_dashboard_stats()
+        if stats and stats.get("total_sessions", 0) > 1:
+            st.divider()
+            st.subheader("Ta progression")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Sessions complétées", stats["total_sessions"])
+            c2.metric("Score moyen", f"{stats['avg_score']}/100")
+            c3.metric("Meilleur score", f"{stats['best_score']}/100")
+
+            if stats.get("score_trend"):
+                st.line_chart({"Score": stats["score_trend"]})
+
+            if stats.get("recurring_misses"):
+                st.markdown("**Pains que tu rates régulièrement :**")
+                for pain_hint, count in stats["recurring_misses"]:
+                    st.caption(f"× {count}x — {pain_hint}...")
+
         st.divider()
 
         # Full report

@@ -2,3 +2,4 @@ anthropic>=0.96.0
 streamlit>=1.56.0
 python-dotenv>=1.0.0
 langfuse>=4.3.0
+supabase>=2.0.0
