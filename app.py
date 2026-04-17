@@ -8,9 +8,12 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 # Streamlit Cloud: inject st.secrets into env vars so all downstream code works unchanged
-for key in ["ANTHROPIC_API_KEY", "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_HOST", "SUPABASE_URL", "SUPABASE_KEY"]:
-    if key in st.secrets and not os.getenv(key):
-        os.environ[key] = st.secrets[key]
+try:
+    for key in ["ANTHROPIC_API_KEY", "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_HOST", "SUPABASE_URL", "SUPABASE_KEY"]:
+        if key in st.secrets and not os.getenv(key):
+            os.environ[key] = st.secrets[key]
+except Exception:
+    pass
 
 sys.path.insert(0, os.path.dirname(__file__))
 
