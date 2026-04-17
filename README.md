@@ -100,7 +100,7 @@ Un "tool" = une action que Claude peut **décider de prendre**. Il voit la descr
 | `check_already_revealed(pain_id)` | Avant de mentionner un pain — vérification de cohérence |
 | `flag_question(quality, question, reason)` | La question est notable (`excellent` / `good` / `weak` / `closed` / `leading`) |
 
-### Feedback Agent — 4 tools
+### Feedback Agent — 5 tools
 
 | Tool | Ce qu'il calcule |
 |------|-----------------|
@@ -108,6 +108,9 @@ Un "tool" = une action que Claude peut **décider de prendre**. Il voit la descr
 | `identify_missed_pains()` | Pains du persona jamais surfacés par le PM |
 | `match_pains_to_metrics()` | Couverture des métriques pré-définies |
 | `compute_score(weights)` | Score final 0-100 pondéré (pains 40% / qualité 35% / métriques 25%) |
+| `load_pm_history()` | Appelé **en dernier** — croise les faiblesses de la session courante avec l'historique Supabase pour détecter les patterns récurrents |
+
+**Ordre des tools intentionnel :** `load_pm_history` est appelé après toute l'analyse de la session courante. Claude sait déjà ce qui s'est mal passé avant de consulter l'historique — il peut donc croiser précisément : "tu rates ce pain pour la 3ème fois" plutôt que de recevoir un dump de données sans contexte.
 
 ---
 

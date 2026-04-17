@@ -124,33 +124,66 @@ def _load_pm_history(tool_input: dict, state: dict) -> str:
 
     state["_pm_history"] = sessions
 
-    lines = [f"Found {len(sessions)} past session(s):\n"]
-    for i, s in enumerate(sessions, 1):
-        score = s.get("score", "?")
-        total_q = s.get("total_questions", "?")
-        missed = [p.get("content", "")[:50] for p in (s.get("missed_pains") or [])]
-        breakdown = s.get("score_breakdown") or {}
-        lines.append(
-            f"Session {i} ({s.get('created_at', '')[:10]}) — "
-            f"Score: {score}/100 | Questions: {total_q} | "
-            f"Pain discovery: {breakdown.get('pain_discovery', '?')}% | "
-            f"Missed pains: {missed}"
-        )
+    # ── Score trend ──────────────────────────────────────────────────────────
+    scores = [s["score"] for s in sessions if s.get("score") is not None]
+    avg = round(sum(scores) / len(scores)) if scores else 0
+    trend = " → ".join(str(s) for s in reversed(scores))
 
-    # Detect recurring missed pains across sessions
+    lines = [
+        f"HISTORICAL SUMMARY ({len(sessions)} sessions)",
+        f"Score trend (oldest→latest): {trend}",
+        f"Average: {avg}/100",
+        "",
+    ]
+
+    # ── Score breakdown trend (are sub-dimensions improving?) ────────────────
+    dim_trend = {"pain_discovery": [], "question_quality": [], "metric_coverage": []}
+    for s in reversed(sessions):
+        bd = s.get("score_breakdown") or {}
+        for dim in dim_trend:
+            val = bd.get(dim)
+            if val is not None:
+                dim_trend[dim].append(val)
+
+    lines.append("Sub-dimension trends (oldest→latest):")
+    for dim, vals in dim_trend.items():
+        if vals:
+            arrow = "↑" if len(vals) >= 2 and vals[-1] > vals[0] else ("↓" if len(vals) >= 2 and vals[-1] < vals[0] else "→")
+            lines.append(f"  {arrow} {dim}: {' → '.join(str(v) for v in vals)}")
+    lines.append("")
+
+    # ── Recurring missed pains ────────────────────────────────────────────────
     miss_counts = {}
     for s in sessions:
         for p in (s.get("missed_pains") or []):
-            key = p.get("content", "")[:60]
+            key = p.get("content", "")[:80]
             miss_counts[key] = miss_counts.get(key, 0) + 1
 
-    recurring = [(k, v) for k, v in miss_counts.items() if v >= 2]
+    recurring = sorted([(k, v) for k, v in miss_counts.items() if v >= 2], key=lambda x: -x[1])
     if recurring:
-        lines.append("\nRECURRING PATTERNS (missed in 2+ sessions):")
-        for pain_hint, count in sorted(recurring, key=lambda x: -x[1]):
-            lines.append(f"  × {count}x — {pain_hint}")
-        lines.append("\n→ Reference these patterns explicitly in your feedback report.")
+        lines.append("RECURRING MISSED PAINS (same weakness across sessions):")
+        for pain_hint, count in recurring:
+            lines.append(f"  × {count}/{len(sessions)} sessions — {pain_hint}")
+        lines.append("")
 
+    # ── Cross with current session findings ──────────────────────────────────
+    current_missed = [p.get("content", "")[:80] for p in (state.get("_missed_pains_list") or [])]
+    if current_missed and recurring:
+        recurring_keys = [k for k, _ in recurring]
+        relapse = [p for p in current_missed if any(r[:40] in p or p[:40] in r for r in recurring_keys)]
+        if relapse:
+            lines.append("⚠ SAME MISTAKES THIS SESSION:")
+            for p in relapse:
+                count = next((v for k, v in recurring if k[:40] in p or p[:40] in k), "?")
+                lines.append(f"  → Missed again (now {count}+ times): {p}")
+            lines.append("")
+
+    # ── Strengths (consistent high scores) ───────────────────────────────────
+    for dim, vals in dim_trend.items():
+        if len(vals) >= 2 and min(vals) >= 60:
+            lines.append(f"✓ CONSISTENT STRENGTH: {dim} has stayed above 60 across all sessions.")
+
+    lines.append("\n→ Reference these patterns explicitly. Be precise: 'This is the Nth time you missed X.'")
     return "\n".join(lines)
 
 
@@ -212,6 +245,7 @@ def _identify_missed_pains(state: dict) -> str:
     found = [(i, pain) for i, pain in enumerate(all_pains) if i in revealed]
 
     state["_pain_discovery_rate"] = round(len(found) / len(all_pains) * 100) if all_pains else 0
+    state["_missed_pains_list"] = [{"content": pain} for _, pain in missed]
 
     result = f"Pain discovery: {len(found)}/{len(all_pains)} ({state['_pain_discovery_rate']}%)\n\n"
     result += "FOUND:\n"
